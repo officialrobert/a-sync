@@ -2,20 +2,24 @@
 
 A-SYNC: API sync engine with persistent client-side storage.
 
-```typescript
-import { init } from "a-sync";
+## Setup
 
+```typescript
+// store/index.ts
+import { init } from "a-sync/core";
+
+export const store = init({ appName: "yourApp" });
+```
+
+## Define your data and specify how to set and retrieve it via APIs.
+
+```typescript
+import { store } from "store";
 // Usage example:
 interface IUser {
   id: string;
   name: string;
 }
-
-interface ISettings {
-  theme: string;
-}
-
-export const store = init({ appName: "yourApp" });
 
 // Define your data and set up GET and SET APIs.
 // 'userProfile' sample
@@ -38,12 +42,16 @@ store
     // handle error
     // defineKey === 'userProfile'
   });
+```
 
+## How to use set and get APIs
+
+```typescript
 const user = store.getDefined("userProfile");
 
 await user.callSet({ name: "John", id: "123" });
 
-const { data: userProfile, source } = await user.callGet({ id: "123" }); // with Async Generator
+const { data: userProfile, source } = await user.callGet({ id: "123" }); // Async Generator
 ```
 
 ## Deal with Getters
