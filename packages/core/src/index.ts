@@ -35,6 +35,7 @@ export class SyncDefineApi<T extends ObjectType> {
   }
 
   private validateObject(value: unknown): asserts value is ObjectType {
+    // must check if object is empty or not
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new AYESyncError(
         "Arguments must be an object type, not an array or primitive"
@@ -107,6 +108,7 @@ export class SyncDefineApi<T extends ObjectType> {
     }
 
     this.validateObject(args);
+
     const storageKey = this.generateStorageKey(args);
 
     try {
