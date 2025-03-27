@@ -1,5 +1,6 @@
 export interface IDefineParams {
   key: string;
+  uniqueProperties: string[];
   apiCallTimeoutMs?: number;
   apiSetRetries?: number;
 }

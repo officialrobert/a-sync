@@ -28,6 +28,8 @@ export class SyncDefineApi<T extends ObjectType> {
   private apiCallTimeoutMs: number = 20_000; // 20 seconds default api timeout
   private static PENDING_ITEMS_KEY = "a-sync-pending-items";
   private appName: string;
+  // Properties that are unique for each item
+  private uniqueProperties: string[] = [];
 
   constructor(
     key: string,
@@ -40,6 +42,7 @@ export class SyncDefineApi<T extends ObjectType> {
     this.apiSetRetries = options?.apiSetRetries ?? 3;
     this.apiCallTimeoutMs = options?.apiCallTimeoutMs ?? 20_000;
     this.appName = appName;
+    this.uniqueProperties = options?.uniqueProperties ?? [];
   }
 
   private validateObject(value: unknown): asserts value is ObjectType {
@@ -103,19 +106,32 @@ export class SyncDefineApi<T extends ObjectType> {
   }
 
   private generateStorageKey(args: ObjectType): string {
-    // Create a stable hash from the arguments
-    const argsHash = Object.entries(args)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${key}:${value}`)
+    if (this.uniqueProperties.length === 0) {
+      return this.key;
+    }
+
+    const uniqueHash = this.uniqueProperties
+      .sort((a, b) => a.localeCompare(b))
+      .map((prop) => {
+        const value = args[prop];
+        return typeof value !== "undefined" ? `${prop}:${value}` : null;
+      })
+      .filter((p) => !!p)
       .join("|");
 
-    return `${this.key}${argsHash ? `|${argsHash}` : ""}`;
+    return `${this.key}${uniqueHash ? `|${uniqueHash}` : ""}`;
   }
 
   private isOnline(): boolean {
     return typeof window.navigator !== "undefined" && window.navigator.onLine;
   }
 
+  /**
+   * An async generator that yields the data from the API and the storage.
+   *
+   * @param {IsObject<Partial<U>>} args
+   * @returns {AsyncGenerator<{ data: U | null; source: "storage" | "api" }>}
+   */
   async *callGet<U extends T = T>(
     args: IsObject<Partial<U>>
   ): AsyncGenerator<{ data: U | null; source: "storage" | "api" }> {
@@ -156,6 +172,13 @@ export class SyncDefineApi<T extends ObjectType> {
     }
   }
 
+  /**
+   * Call the API set function and optimistically update the data in localForage.
+   * If the API call fails, the data will be saved in localForage's pending items.
+   *
+   * @param {IsObject<Partial<U>>} params
+   * @returns  { data: U | null }
+   */
   async callSet<U extends T = T>(
     params: IsObject<Partial<U>>
   ): Promise<{ data: U | null }> {
@@ -325,7 +348,7 @@ export class SyncDefineApi<T extends ObjectType> {
         try {
           const result = await this.setFn?.(item.params as Partial<T>);
 
-          if (typeof result !== "undefined") {
+          if (typeof result !== "undefined" && !!item?.dataKey) {
             await this.store.setItem(item.dataKey, result);
             await this.removePendingItem(item.dataKey);
           }
@@ -338,7 +361,7 @@ export class SyncDefineApi<T extends ObjectType> {
             typeof item?.maxRetryCount !== "number"
           ) {
             await this.removePendingItem(item.dataKey);
-          } else {
+          } else if (item?.dataKey?.length > 0) {
             item.maxRetryCount -= 1;
             item.lastRetryAttempt = new Date().toISOString();
             await this.savePendingItem(item.params, item.dataKey);
@@ -374,10 +397,29 @@ export class SyncEngineApi<TypeMap extends Record<string, ObjectType> = {}> {
     this.setupOnlineListener();
   }
 
+  /**
+   * Get the localForage database instance.
+   *
+   * @returns  {LocalForage}
+   */
+  getDB(): LocalForage {
+    return this.store;
+  }
+
+  /**
+   * Check if the localForage database is ready.
+   *
+   * @returns  {boolean}
+   */
   isLocalDbReady(): boolean {
     return this.localDbReady;
   }
 
+  /**
+   * Returns a promise that resolves when the localForage database is ready.
+   *
+   * @returns  {Promise<boolean>}
+   */
   waitForLocalDbReady(): Promise<boolean> {
     return new Promise((resolve) => {
       if (!this.store) {
@@ -399,6 +441,14 @@ export class SyncEngineApi<TypeMap extends Record<string, ObjectType> = {}> {
   define<K extends string, T extends ObjectType>(
     params: IDefineParams & { key: K }
   ): SyncDefineApi<T> & SyncEngineApi<TypeMap & Record<K, T>> {
+    const uniqueProperties = (params.uniqueProperties || []).filter(
+      (p) => typeof p === "string" && p?.length > 0
+    );
+
+    if (!uniqueProperties?.length) {
+      throw new AYESyncError("'uniqueProperties' must be an array of strings");
+    }
+
     const definition = new SyncDefineApi<T>(
       params.key,
       this.store,

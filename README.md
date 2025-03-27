@@ -26,7 +26,10 @@ interface IUser {
 // Define your data and set up GET and SET APIs.
 // 'userProfile' sample
 store
-  .define<"userProfile", IUser>({ key: "userProfile" })
+  .define<"userProfile", IUser>({
+    key: "userProfile",
+    uniqueProperties: ["id"],
+  })
   .get(async (args) => {
     // you can call as many APIs as you want to fetch data and mutate 'userProfile'
     const response = await fetch(`/api/${args.id}`);
