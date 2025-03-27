@@ -15,26 +15,25 @@ interface ISettings {
   theme: string;
 }
 
-const store = init({ appName: "yourApp" });
+export const store = init({ appName: "yourApp" });
 
-const userApi = store
-  .define<"userProfile", IUser>({ key: "userProfile" })
-  .get(async (args) => {
-    const response = await fetch(`/api/${args.id}`);
-    return response.json();
-  });
+// Define your data and set up GET and SET APIs.
+// 'userProfile' sample
+store.define<"userProfile", IUser>({ key: "userProfile" }).get(async (args) => {
+  const response = await fetch(`/api/${args.id}`);
+  return response.json();
+});
 
-const settingsApi = store
-  .define<"settings", ISettings>({ key: "settings" })
-  .get(async (args) => {
-    return { theme: "dark" };
-  });
+// 'settings' sample
+store.define<"settings", ISettings>({ key: "settings" }).get(async (args) => {
+  return { theme: "dark" };
+});
 
 const user = store.getDefined("userProfile");
 
-const settings = store.getDefined("settings");
+await user.callSet({ name: "John", id: "123" });
 
-await user.callGet({ id: "123" });
-await user.callSet({ name: "John" });
-await settings.callSet({ theme: "light" });
+const { data: userProfile, source } = await user.callGet({ id: "123" });
+
+const { data: userProfile } = await user.getData({ id: "123" });
 ```

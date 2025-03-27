@@ -1,6 +1,6 @@
 import * as localForage from "localforage";
 import { AYESyncError } from "./error";
-import { IDefineParams, SyncEngineParams } from "./types";
+import { IDefineParams, PendingItem, SyncEngineParams } from "./types";
 
 type ObjectType = Record<string, any>;
 type IsObject<T> = T extends ObjectType ? T : never;
@@ -16,15 +16,22 @@ export class SyncDefineApi<T extends ObjectType> {
   private setFn?: SetFunction<T>;
   private dataCallbacks: EventCallback<T>[] = [];
   private errorCallbacks: ErrorCallback[] = [];
-  private retryCount: number = 0;
   private apiSetRetries: number = 3;
-  private apiCallTimeoutMs: number = 5000;
+  private apiCallTimeoutMs: number = 20_000; // 20 seconds default api timeout
+  private static PENDING_ITEMS_KEY = "a-sync-pending-items";
+  private appName: string;
 
-  constructor(key: string, store: LocalForage, options?: IDefineParams) {
+  constructor(
+    key: string,
+    store: LocalForage,
+    appName: string,
+    options?: IDefineParams
+  ) {
     this.key = key;
     this.store = store;
     this.apiSetRetries = options?.apiSetRetries ?? 3;
-    this.apiCallTimeoutMs = options?.apiCallTimeoutMs ?? 5000;
+    this.apiCallTimeoutMs = options?.apiCallTimeoutMs ?? 20_000;
+    this.appName = appName;
   }
 
   private validateObject(value: unknown): asserts value is ObjectType {
@@ -33,6 +40,10 @@ export class SyncDefineApi<T extends ObjectType> {
         "Arguments must be an object type, not an array or primitive"
       );
     }
+  }
+
+  private getPendingItemsLocalKey(): string {
+    return this.appName + SyncDefineApi.PENDING_ITEMS_KEY;
   }
 
   get(fn: GetFunction<T>): SyncDefineApi<T> {
@@ -78,69 +89,231 @@ export class SyncDefineApi<T extends ObjectType> {
     this.errorCallbacks.forEach((callback) => callback(error));
   }
 
-  async callGet(args: IsObject<Partial<T>>): Promise<{ data: T | null }> {
+  private generateStorageKey(args: ObjectType): string {
+    // Create a stable hash from the arguments
+    const argsHash = Object.entries(args)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]) => `${key}:${value}`)
+      .join("|");
+
+    return `${this.key}${argsHash ? `|${argsHash}` : ""}`;
+  }
+
+  async *callGet<U extends T = T>(
+    args: IsObject<Partial<U>>
+  ): AsyncGenerator<{ data: U | null; source: "storage" | "api" }> {
     if (!this.getFn) {
       throw new AYESyncError("Get function not defined");
     }
 
     this.validateObject(args);
+    const storageKey = this.generateStorageKey(args);
 
     try {
-      // Try to get from store first
-      const storedData = await this.store.getItem<T>(this.key);
+      // Try to get from store first using the unique key
+      const storedData = await this.store.getItem<U>(storageKey);
 
       if (storedData) {
-        this.emitData(storedData);
-        return { data: storedData };
+        this.emitData(storedData as T);
+        yield { data: storedData, source: "storage" };
       }
 
       // Call API
-      const data = await this.executeWithTimeout(this.getFn(args));
+      const data = (await this.getFn(args as Partial<T>)) as U;
 
-      // Store the result
-      await this.store.setItem(this.key, data);
+      // Store the result with the unique key
+      await this.store.setItem(storageKey, data);
 
-      this.emitData(data);
-      return { data };
+      this.emitData(data as T);
+      yield { data, source: "api" };
     } catch (error) {
-      this.emitError(error as Error);
-      return { data: null };
+      this.emitError(
+        new AYESyncError(
+          error instanceof Error ? error?.message : "callGet error"
+        )
+      );
+
+      yield { data: null, source: "api" };
     }
   }
 
-  async callSet(data: IsObject<Partial<T>>): Promise<{ data: T | null }> {
+  async callSet<U extends T = T>(
+    params: IsObject<Partial<U>>
+  ): Promise<{ data: U | null }> {
     if (!this.setFn) {
       throw new AYESyncError("Set function not defined");
     }
 
-    this.validateObject(data);
+    this.validateObject(params);
+    const storageKey = this.generateStorageKey(params);
 
     try {
-      const result = await this.executeWithTimeout(this.setFn(data));
+      const result = (await this.executeWithTimeout(
+        this.setFn(params as Partial<T>)
+      )) as U;
 
-      // Store the result
-      await this.store.setItem(this.key, result);
+      // Store the result with the unique key
+      await this.store.setItem(storageKey, result);
 
-      this.emitData(result);
-      this.retryCount = 0;
+      this.emitData(result as T);
       return { data: result };
     } catch (error) {
-      this.emitError(error as Error);
+      if (!this.apiSetRetries || this.apiSetRetries < 0) {
+        this.emitError(
+          new AYESyncError(
+            error instanceof Error ? error?.message : "callSet error"
+          )
+        );
+      } else {
+        for (let i = 0; i < this.apiSetRetries; i++) {
+          try {
+            const result = (await this.executeWithTimeout(
+              this.setFn(params as Partial<T>)
+            )) as U;
 
-      // Handle offline/error retry logic
-      if (this.retryCount < this.apiSetRetries) {
-        this.retryCount++;
-        // Store pending operation
-        await this.store.setItem(`${this.key}_pending`, {
-          data,
-          retryCount: this.retryCount,
-        });
+            // Store the result with the unique key
+            await this.store.setItem(storageKey, result);
 
-        // Could implement retry mechanism here
-        return this.callSet(data);
+            this.emitData(result as T);
+
+            break;
+          } catch (error) {
+            if (i === this.apiSetRetries - 1) {
+              this.emitError(
+                new AYESyncError(
+                  error instanceof Error ? error?.message : "callSet error"
+                )
+              );
+
+              // keep track of all pending items
+              await this.savePendingItem(params, storageKey);
+            }
+          }
+        }
       }
 
       return { data: null };
+    }
+  }
+
+  /**
+   * Fetch most recent data from localForage
+   *
+   * @param {IsObject<Partial<U>>} args
+   * @returns { data: U | null }
+   */
+  async getData<U extends T = T>(
+    args: IsObject<Partial<U>>
+  ): Promise<{ data: U | null }> {
+    this.validateObject(args);
+    const storageKey = this.generateStorageKey(args);
+
+    try {
+      const storedData = await this.store.getItem<U>(storageKey);
+
+      if (storedData) {
+        this.emitData(storedData as T);
+        return { data: storedData };
+      }
+
+      return { data: null };
+    } catch (error) {
+      this.emitError(
+        new AYESyncError(
+          error instanceof Error
+            ? error?.message
+            : "Error while getting data from localForage"
+        )
+      );
+
+      return { data: null };
+    }
+  }
+
+  private async savePendingItem(
+    params: Partial<T>,
+    dataKey: string
+  ): Promise<void> {
+    try {
+      // Get existing pending items
+      const pendingItems =
+        (await this.store.getItem<PendingItem<any>[]>(
+          this.getPendingItemsLocalKey()
+        )) || [];
+
+      const pendingItem: PendingItem<T> = {
+        params,
+        dataKey,
+        maxRetryCount: this.apiSetRetries,
+        lastRetryAttempt: Date.now(),
+        key: this.key,
+      };
+
+      // Add new pending item
+      pendingItems.push(pendingItem);
+
+      // Save updated pending items
+      await this.store.setItem(this.getPendingItemsLocalKey(), pendingItems);
+    } catch (error) {
+      this.emitError(new AYESyncError("Failed to save pending item"));
+    }
+  }
+
+  private async removePendingItem(dataKey: string): Promise<void> {
+    try {
+      const pendingItems =
+        (await this.store.getItem<PendingItem<any>[]>(
+          this.getPendingItemsLocalKey()
+        )) || [];
+      const updatedItems = pendingItems.filter(
+        (item) => item.dataKey !== dataKey
+      );
+      await this.store.setItem(this.getPendingItemsLocalKey(), updatedItems);
+    } catch (error) {
+      this.emitError(
+        new AYESyncError(`Failed to remove pending item: ${dataKey}`)
+      );
+    }
+  }
+
+  async retryPendingItems(): Promise<void> {
+    try {
+      const pendingItems =
+        (await this.store.getItem<PendingItem<any>[]>(
+          this.getPendingItemsLocalKey()
+        )) || [];
+      const currentItems = pendingItems.filter((item) => item.key === this.key);
+      const currentItemKeys = currentItems.map((item) => item.dataKey);
+
+      for (const item of currentItems) {
+        try {
+          const result = await this.setFn?.(item.params as Partial<T>);
+
+          if (typeof result !== "undefined") {
+            await this.store.setItem(item.dataKey, result);
+            await this.removePendingItem(item.dataKey);
+          }
+        } catch (error) {
+          // Skip this item if max retries reached
+          if (item.maxRetryCount <= 0) {
+            await this.removePendingItem(item.dataKey);
+            continue;
+          }
+
+          // Update retry count and timestamp
+          item.maxRetryCount--;
+          item.lastRetryAttempt = Date.now();
+          await this.savePendingItem(item.params, item.dataKey);
+        }
+      }
+    } catch (error) {
+      this.emitError(
+        new AYESyncError(
+          `Failed to retry pending items from ${this.key}: ${
+            error instanceof Error ? error?.message : ""
+          }`
+        )
+      );
     }
   }
 }
@@ -152,18 +325,47 @@ export class SyncEngineApi<TypeMap extends Record<string, ObjectType> = {}> {
     [K in keyof TypeMap]: SyncDefineApi<TypeMap[K]>;
   } = {} as any;
   private store: LocalForage;
+  private localDbReady: boolean = false;
 
   constructor(params: SyncEngineParams) {
     this.appName = params.appName;
     this.store = localForage.createInstance({
       name: this.appName,
     });
+    this.setupOnlineListener();
+  }
+
+  isLocalDbReady(): boolean {
+    return this.localDbReady;
+  }
+
+  waitForLocalDbReady(): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (!this.store) {
+        return resolve(false);
+      }
+
+      this.store
+        .ready()
+        .then(() => {
+          this.localDbReady = true;
+          return resolve(true);
+        })
+        .catch(() => {
+          return resolve(false);
+        });
+    });
   }
 
   define<K extends string, T extends ObjectType>(
     params: IDefineParams & { key: K }
   ): SyncDefineApi<T> & SyncEngineApi<TypeMap & Record<K, T>> {
-    const definition = new SyncDefineApi<T>(params.key, this.store, params);
+    const definition = new SyncDefineApi<T>(
+      params.key,
+      this.store,
+      this.appName,
+      params
+    );
 
     this.definedKeysMap[params.key as keyof TypeMap] = definition as any;
     this.definedKeys.push(params.key);
@@ -178,6 +380,23 @@ export class SyncEngineApi<TypeMap extends Record<string, ObjectType> = {}> {
     }
 
     return definition;
+  }
+
+  destroy(): void {
+    window.removeEventListener("online", this.retryAllPendingItems);
+  }
+
+  async retryAllPendingItems(): Promise<void> {
+    for (const key of this.definedKeys) {
+      const api = this.getDefined(key);
+      await api.retryPendingItems();
+    }
+  }
+
+  private setupOnlineListener(): void {
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", this.retryAllPendingItems);
+    }
   }
 }
 
