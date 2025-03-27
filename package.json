@@ -1,0 +1,23 @@
+{
+  "name": "a-sync",
+  "version": "1.0.0",
+  "description": "A-SYNC: API sync engine with persistent client-side storage",
+  "main": "index.js",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "lerna run build",
+    "test": "lerna run test",
+    "clean": "lerna run clean",
+    "dev": "lerna run dev --parallel"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "lerna": "^7.4.2",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.8.2"
+  }
+}
