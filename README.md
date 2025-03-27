@@ -2,6 +2,8 @@
 
 A-SYNC: API sync engine with persistent client-side storage.
 
+Tired of switching to new ORM libraries just to support API sync? Bring your own database and APIs—this is the perfect library for you!
+
 ## Setup
 
 ```typescript
