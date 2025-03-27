@@ -33,13 +33,37 @@ store
       body: JSON.stringify(args),
     });
     return response.json();
+  })
+  .on("error", ({ error, defineKey }) => {
+    // handle error
+    // defineKey === 'userProfile'
   });
 
 const user = store.getDefined("userProfile");
 
 await user.callSet({ name: "John", id: "123" });
 
-const { data: userProfile, source } = await user.callGet({ id: "123" });
+const { data: userProfile, source } = await user.callGet({ id: "123" }); // with Async Generator
+```
 
-const { data: userProfile } = await user.getData({ id: "123" });
+## Deal with Getters
+
+> Read data from an async generator method
+
+```typescript
+for await (const { data, source } of user.callGet({ id: "123" })) {
+  if (source === "storage") {
+    // data === userProfile
+  }
+
+  if (source === "api") {
+    // data === userProfile
+  }
+}
+```
+
+> Read stored data from LocalForage
+
+```typescript
+const { data } = await user.getData({ id: "123" });
 ```

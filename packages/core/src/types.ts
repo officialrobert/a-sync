@@ -12,6 +12,6 @@ export interface PendingItem<T> {
   params: Partial<T>;
   dataKey: string;
   maxRetryCount: number;
-  lastRetryAttempt: number;
+  lastRetryAttempt: string;
   key: string; // The original define key
 }

@@ -6,8 +6,16 @@ type ObjectType = Record<string, any>;
 type IsObject<T> = T extends ObjectType ? T : never;
 type GetFunction<T extends ObjectType> = (args: Partial<T>) => Promise<T>;
 type SetFunction<T extends ObjectType> = (data: Partial<T>) => Promise<T>;
-type EventCallback<T> = (data: T) => void;
-type ErrorCallback = (error: Error) => void;
+type EventCallback<T> = (params: {
+  data: T;
+  defineKey: string;
+  dataKey?: string;
+}) => void;
+type ErrorCallback = (params: {
+  error: Error;
+  defineKey: string;
+  dataKey?: string;
+}) => void;
 
 export class SyncDefineApi<T extends ObjectType> {
   private key: string;
@@ -82,12 +90,16 @@ export class SyncDefineApi<T extends ObjectType> {
     return Promise.race([promise, timeout]);
   }
 
-  private emitData(data: T) {
-    this.dataCallbacks.forEach((callback) => callback(data));
+  private emitData(data: T, dataKey?: string) {
+    this.dataCallbacks.forEach((callback) =>
+      callback({ data, dataKey, defineKey: this.key })
+    );
   }
 
-  private emitError(error: Error) {
-    this.errorCallbacks.forEach((callback) => callback(error));
+  private emitError(error: Error | AYESyncError, dataKey?: string) {
+    this.errorCallbacks.forEach((callback) =>
+      callback({ error, dataKey, defineKey: this.key })
+    );
   }
 
   private generateStorageKey(args: ObjectType): string {
@@ -98,6 +110,10 @@ export class SyncDefineApi<T extends ObjectType> {
       .join("|");
 
     return `${this.key}${argsHash ? `|${argsHash}` : ""}`;
+  }
+
+  private isOnline(): boolean {
+    return typeof window.navigator !== "undefined" && window.navigator.onLine;
   }
 
   async *callGet<U extends T = T>(
@@ -116,7 +132,7 @@ export class SyncDefineApi<T extends ObjectType> {
       const storedData = await this.store.getItem<U>(storageKey);
 
       if (storedData) {
-        this.emitData(storedData as T);
+        this.emitData(storedData as T, storageKey);
         yield { data: storedData, source: "storage" };
       }
 
@@ -126,13 +142,14 @@ export class SyncDefineApi<T extends ObjectType> {
       // Store the result with the unique key
       await this.store.setItem(storageKey, data);
 
-      this.emitData(data as T);
+      this.emitData(data as T, storageKey);
       yield { data, source: "api" };
     } catch (error) {
       this.emitError(
         new AYESyncError(
           error instanceof Error ? error?.message : "callGet error"
-        )
+        ),
+        storageKey
       );
 
       yield { data: null, source: "api" };
@@ -150,22 +167,38 @@ export class SyncDefineApi<T extends ObjectType> {
     const storageKey = this.generateStorageKey(params);
 
     try {
+      // Get existing data if any
+      const existingData = await this.store.getItem<U>(storageKey);
+      // Optimistically update storage with new data
+      const optimisticData = {
+        ...(existingData || {}),
+        ...params,
+      } as U;
+
+      if (this.isOnline()) {
+        await this.store.setItem(storageKey, optimisticData);
+      }
+
       const result = (await this.executeWithTimeout(
         this.setFn(params as Partial<T>)
       )) as U;
 
-      // Store the result with the unique key
       await this.store.setItem(storageKey, result);
 
-      this.emitData(result as T);
+      this.emitData(result as T, storageKey);
+
       return { data: result };
     } catch (error) {
       if (!this.apiSetRetries || this.apiSetRetries < 0) {
         this.emitError(
           new AYESyncError(
             error instanceof Error ? error?.message : "callSet error"
-          )
+          ),
+          storageKey
         );
+
+        // keep track of all pending items
+        await this.savePendingItem(params, storageKey);
       } else {
         for (let i = 0; i < this.apiSetRetries; i++) {
           try {
@@ -176,7 +209,7 @@ export class SyncDefineApi<T extends ObjectType> {
             // Store the result with the unique key
             await this.store.setItem(storageKey, result);
 
-            this.emitData(result as T);
+            this.emitData(result as T, storageKey);
 
             break;
           } catch (error) {
@@ -184,7 +217,8 @@ export class SyncDefineApi<T extends ObjectType> {
               this.emitError(
                 new AYESyncError(
                   error instanceof Error ? error?.message : "callSet error"
-                )
+                ),
+                storageKey
               );
 
               // keep track of all pending items
@@ -206,7 +240,7 @@ export class SyncDefineApi<T extends ObjectType> {
    */
   async getData<U extends T = T>(
     args: IsObject<Partial<U>>
-  ): Promise<{ data: U | null }> {
+  ): Promise<{ data: U | null | undefined; error?: Error }> {
     this.validateObject(args);
     const storageKey = this.generateStorageKey(args);
 
@@ -214,11 +248,10 @@ export class SyncDefineApi<T extends ObjectType> {
       const storedData = await this.store.getItem<U>(storageKey);
 
       if (storedData) {
-        this.emitData(storedData as T);
         return { data: storedData };
       }
 
-      return { data: null };
+      return { data: undefined };
     } catch (error) {
       this.emitError(
         new AYESyncError(
@@ -228,7 +261,7 @@ export class SyncDefineApi<T extends ObjectType> {
         )
       );
 
-      return { data: null };
+      return { data: null, ...(error instanceof Error ? { error } : {}) };
     }
   }
 
@@ -247,7 +280,7 @@ export class SyncDefineApi<T extends ObjectType> {
         params,
         dataKey,
         maxRetryCount: this.apiSetRetries,
-        lastRetryAttempt: Date.now(),
+        lastRetryAttempt: new Date().toISOString(),
         key: this.key,
       };
 
@@ -257,7 +290,9 @@ export class SyncDefineApi<T extends ObjectType> {
       // Save updated pending items
       await this.store.setItem(this.getPendingItemsLocalKey(), pendingItems);
     } catch (error) {
-      this.emitError(new AYESyncError("Failed to save pending item"));
+      this.emitError(
+        new AYESyncError(`Failed to save pending item: ${dataKey}`)
+      );
     }
   }
 
@@ -285,7 +320,6 @@ export class SyncDefineApi<T extends ObjectType> {
           this.getPendingItemsLocalKey()
         )) || [];
       const currentItems = pendingItems.filter((item) => item.key === this.key);
-      const currentItemKeys = currentItems.map((item) => item.dataKey);
 
       for (const item of currentItems) {
         try {
@@ -296,16 +330,19 @@ export class SyncDefineApi<T extends ObjectType> {
             await this.removePendingItem(item.dataKey);
           }
         } catch (error) {
-          // Skip this item if max retries reached
-          if (item.maxRetryCount <= 0) {
+          if (
+            !item?.maxRetryCount ||
+            // Skip this item if max retries reached
+            item?.maxRetryCount <= 0 ||
+            // or someone manually updated 'maxRetryCount' value
+            typeof item?.maxRetryCount !== "number"
+          ) {
             await this.removePendingItem(item.dataKey);
-            continue;
+          } else {
+            item.maxRetryCount -= 1;
+            item.lastRetryAttempt = new Date().toISOString();
+            await this.savePendingItem(item.params, item.dataKey);
           }
-
-          // Update retry count and timestamp
-          item.maxRetryCount--;
-          item.lastRetryAttempt = Date.now();
-          await this.savePendingItem(item.params, item.dataKey);
         }
       }
     } catch (error) {
