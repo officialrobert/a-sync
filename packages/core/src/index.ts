@@ -4,8 +4,18 @@ import { IDefineParams, PendingItem, SyncEngineParams } from "./types";
 
 type ObjectType = Record<string, any>;
 type IsObject<T> = T extends ObjectType ? T : never;
-type GetFunction<T extends ObjectType> = (args: Partial<T>) => Promise<T>;
-type SetFunction<T extends ObjectType> = (data: Partial<T>) => Promise<T>;
+type ValidReturnType = ObjectType;
+
+type GetFunction<
+  TReturn extends ValidReturnType,
+  TArgs extends ObjectType = ObjectType
+> = (args: Partial<TArgs>) => Promise<TReturn>;
+
+type SetFunction<
+  TReturn extends ValidReturnType,
+  TArgs extends ObjectType = ObjectType
+> = (args: Partial<TArgs>) => Promise<TReturn>;
+
 type EventCallback<T> = (params: {
   data: T;
   defineKey: string;
@@ -17,18 +27,20 @@ type ErrorCallback = (params: {
   dataKey?: string;
 }) => void;
 
-export class SyncDefineApi<T extends ObjectType> {
-  private key: string;
+export class SyncDefineApi<
+  TReturn extends ValidReturnType,
+  TArgs extends ObjectType = TReturn
+> {
+  public key: string;
   private store: LocalForage;
-  private getFn?: GetFunction<T>;
-  private setFn?: SetFunction<T>;
-  private dataCallbacks: EventCallback<T>[] = [];
+  private getFn?: GetFunction<TReturn, TArgs>;
+  private setFn?: SetFunction<TReturn, TArgs>;
+  private dataCallbacks: EventCallback<TReturn>[] = [];
   private errorCallbacks: ErrorCallback[] = [];
   private apiSetRetries: number = 3;
-  private apiCallTimeoutMs: number = 20_000; // 20 seconds default api timeout
+  private apiCallTimeoutMs: number = 20_000;
   private static PENDING_ITEMS_KEY = "a-sync-pending-items";
   private appName: string;
-  // Properties that are unique for each item
   private uniqueProperties: string[] = [];
 
   constructor(
@@ -45,11 +57,10 @@ export class SyncDefineApi<T extends ObjectType> {
     this.uniqueProperties = options?.uniqueProperties ?? [];
   }
 
-  private validateObject(value: unknown): asserts value is ObjectType {
-    // must check if object is empty or not
+  private validateArgs(value: unknown): asserts value is Record<string, any> {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new AYESyncError(
-        "Arguments must be an object type, not an array or primitive"
+        "Arguments must be an object type for query parameters"
       );
     }
   }
@@ -58,24 +69,27 @@ export class SyncDefineApi<T extends ObjectType> {
     return this.appName + SyncDefineApi.PENDING_ITEMS_KEY;
   }
 
-  get(fn: GetFunction<T>): SyncDefineApi<T> {
+  get(fn: GetFunction<TReturn, TArgs>): SyncDefineApi<TReturn, TArgs> {
     this.getFn = fn;
     return this;
   }
 
-  set(fn: SetFunction<T>): SyncDefineApi<T> {
+  set(fn: SetFunction<TReturn, TArgs>): SyncDefineApi<TReturn, TArgs> {
     this.setFn = fn;
     return this;
   }
 
-  on(event: "data", callback: EventCallback<T>): SyncDefineApi<T>;
-  on(event: "error", callback: ErrorCallback): SyncDefineApi<T>;
+  on(
+    event: "data",
+    callback: EventCallback<TReturn>
+  ): SyncDefineApi<TReturn, TArgs>;
+  on(event: "error", callback: ErrorCallback): SyncDefineApi<TReturn, TArgs>;
   on(
     event: "data" | "error",
-    callback: EventCallback<T> | ErrorCallback
-  ): SyncDefineApi<T> {
+    callback: EventCallback<TReturn> | ErrorCallback
+  ): SyncDefineApi<TReturn, TArgs> {
     if (event === "data") {
-      this.dataCallbacks.push(callback as EventCallback<T>);
+      this.dataCallbacks.push(callback as EventCallback<TReturn>);
     } else {
       this.errorCallbacks.push(callback as ErrorCallback);
     }
@@ -93,7 +107,7 @@ export class SyncDefineApi<T extends ObjectType> {
     return Promise.race([promise, timeout]);
   }
 
-  private emitData(data: T, dataKey?: string) {
+  private emitData(data: TReturn, dataKey?: string) {
     this.dataCallbacks.forEach((callback) =>
       callback({ data, dataKey, defineKey: this.key })
     );
@@ -129,36 +143,31 @@ export class SyncDefineApi<T extends ObjectType> {
   /**
    * An async generator that yields the data from the API and the storage.
    *
-   * @param {IsObject<Partial<U>>} args
-   * @returns {AsyncGenerator<{ data: U | null; source: "storage" | "api" }>}
+   * @param {IsObject<Partial<TArgs>>} args
+   * @returns {AsyncGenerator<{ data: TReturn | null; source: "storage" | "api" }>}
    */
-  async *callGet<U extends T = T>(
-    args: IsObject<Partial<U>>
-  ): AsyncGenerator<{ data: U | null; source: "storage" | "api" }> {
+  async *callGet(
+    args: IsObject<Partial<TArgs>>
+  ): AsyncGenerator<{ data: TReturn | null; source: "storage" | "api" }> {
     if (!this.getFn) {
       throw new AYESyncError("Get function not defined");
     }
 
-    this.validateObject(args);
-
+    this.validateArgs(args);
     const storageKey = this.generateStorageKey(args);
 
     try {
-      // Try to get from store first using the unique key
-      const storedData = await this.store.getItem<U>(storageKey);
+      const storedData = await this.store.getItem<TReturn>(storageKey);
 
-      if (storedData) {
-        this.emitData(storedData as T, storageKey);
+      if (typeof storedData !== "undefined" && storedData !== null) {
+        this.emitData(storedData, storageKey);
         yield { data: storedData, source: "storage" };
       }
 
-      // Call API
-      const data = (await this.getFn(args as Partial<T>)) as U;
-
-      // Store the result with the unique key
+      const data = await this.getFn(args);
       await this.store.setItem(storageKey, data);
 
-      this.emitData(data as T, storageKey);
+      this.emitData(data, storageKey);
       yield { data, source: "api" };
     } catch (error) {
       this.emitError(
@@ -167,7 +176,6 @@ export class SyncDefineApi<T extends ObjectType> {
         ),
         storageKey
       );
-
       yield { data: null, source: "api" };
     }
   }
@@ -176,39 +184,33 @@ export class SyncDefineApi<T extends ObjectType> {
    * Call the API set function and optimistically update the data in localForage.
    * If the API call fails, the data will be saved in localForage's pending items.
    *
-   * @param {IsObject<Partial<U>>} params
-   * @returns  { data: U | null }
+   * @param {IsObject<Partial<TArgs>>} params
+   * @returns   { data: TReturn | null }
    */
-  async callSet<U extends T = T>(
-    params: IsObject<Partial<U>>
-  ): Promise<{ data: U | null }> {
+  async callSet(
+    params: IsObject<Partial<TArgs>>
+  ): Promise<{ data: TReturn | null }> {
     if (!this.setFn) {
       throw new AYESyncError("Set function not defined");
     }
 
-    this.validateObject(params);
+    this.validateArgs(params);
     const storageKey = this.generateStorageKey(params);
 
     try {
-      // Get existing data if any
-      const existingData = await this.store.getItem<U>(storageKey);
-      // Optimistically update storage with new data
+      const existingData = await this.store.getItem<TReturn>(storageKey);
       const optimisticData = {
-        ...(existingData || {}),
+        ...(typeof existingData === "object" ? existingData : {}),
         ...params,
-      } as U;
+      } as TReturn;
 
       if (this.isOnline()) {
         await this.store.setItem(storageKey, optimisticData);
       }
 
-      const result = (await this.executeWithTimeout(
-        this.setFn(params as Partial<T>)
-      )) as U;
-
+      const result = await this.executeWithTimeout(this.setFn(params));
       await this.store.setItem(storageKey, result);
-
-      this.emitData(result as T, storageKey);
+      this.emitData(result, storageKey);
 
       return { data: result };
     } catch (error) {
@@ -219,22 +221,15 @@ export class SyncDefineApi<T extends ObjectType> {
           ),
           storageKey
         );
-
-        // keep track of all pending items
         await this.savePendingItem(params, storageKey);
       } else {
         for (let i = 0; i < this.apiSetRetries; i++) {
           try {
-            const result = (await this.executeWithTimeout(
-              this.setFn(params as Partial<T>)
-            )) as U;
-
-            // Store the result with the unique key
+            const result = await this.executeWithTimeout(this.setFn(params));
             await this.store.setItem(storageKey, result);
+            this.emitData(result, storageKey);
 
-            this.emitData(result as T, storageKey);
-
-            break;
+            return { data: result };
           } catch (error) {
             if (i === this.apiSetRetries - 1) {
               this.emitError(
@@ -243,8 +238,6 @@ export class SyncDefineApi<T extends ObjectType> {
                 ),
                 storageKey
               );
-
-              // keep track of all pending items
               await this.savePendingItem(params, storageKey);
             }
           }
@@ -258,17 +251,17 @@ export class SyncDefineApi<T extends ObjectType> {
   /**
    * Fetch most recent data from localForage
    *
-   * @param {IsObject<Partial<U>>} args
+   * @param {IsObject<Partial<TArgs>>} args
    * @returns { data: U | null }
    */
-  async getData<U extends T = T>(
-    args: IsObject<Partial<U>>
-  ): Promise<{ data: U | null | undefined; error?: Error }> {
-    this.validateObject(args);
+  async getData(
+    args: IsObject<Partial<TArgs>>
+  ): Promise<{ data: TReturn | null | undefined; error?: Error }> {
+    this.validateArgs(args);
     const storageKey = this.generateStorageKey(args);
 
     try {
-      const storedData = await this.store.getItem<U>(storageKey);
+      const storedData = await this.store.getItem<TReturn>(storageKey);
 
       if (storedData) {
         return { data: storedData };
@@ -289,17 +282,16 @@ export class SyncDefineApi<T extends ObjectType> {
   }
 
   private async savePendingItem(
-    params: Partial<T>,
+    params: Partial<TArgs>,
     dataKey: string
   ): Promise<void> {
     try {
-      // Get existing pending items
       const pendingItems =
-        (await this.store.getItem<PendingItem<any>[]>(
+        (await this.store.getItem<PendingItem<TArgs>[]>(
           this.getPendingItemsLocalKey()
         )) || [];
 
-      const pendingItem: PendingItem<T> = {
+      const pendingItem: PendingItem<TArgs> = {
         params,
         dataKey,
         maxRetryCount: this.apiSetRetries,
@@ -307,10 +299,7 @@ export class SyncDefineApi<T extends ObjectType> {
         key: this.key,
       };
 
-      // Add new pending item
       pendingItems.push(pendingItem);
-
-      // Save updated pending items
       await this.store.setItem(this.getPendingItemsLocalKey(), pendingItems);
     } catch (error) {
       this.emitError(
@@ -339,14 +328,14 @@ export class SyncDefineApi<T extends ObjectType> {
   async retryPendingItems(): Promise<void> {
     try {
       const pendingItems =
-        (await this.store.getItem<PendingItem<any>[]>(
+        (await this.store.getItem<PendingItem<TArgs>[]>(
           this.getPendingItemsLocalKey()
         )) || [];
       const currentItems = pendingItems.filter((item) => item.key === this.key);
 
       for (const item of currentItems) {
         try {
-          const result = await this.setFn?.(item.params as Partial<T>);
+          const result = await this.setFn?.(item.params as TArgs);
 
           if (typeof result !== "undefined" && !!item?.dataKey) {
             await this.store.setItem(item.dataKey, result);
@@ -355,16 +344,14 @@ export class SyncDefineApi<T extends ObjectType> {
         } catch (error) {
           if (
             !item?.maxRetryCount ||
-            // Skip this item if max retries reached
             item?.maxRetryCount <= 0 ||
-            // or someone manually updated 'maxRetryCount' value
             typeof item?.maxRetryCount !== "number"
           ) {
             await this.removePendingItem(item.dataKey);
           } else if (item?.dataKey?.length > 0) {
             item.maxRetryCount -= 1;
             item.lastRetryAttempt = new Date().toISOString();
-            await this.savePendingItem(item.params, item.dataKey);
+            await this.savePendingItem(item.params as TArgs, item.dataKey);
           }
         }
       }
@@ -438,9 +425,14 @@ export class SyncEngineApi<TypeMap extends Record<string, ObjectType> = {}> {
     });
   }
 
-  define<K extends string, T extends ObjectType>(
+  define<
+    K extends string,
+    TReturn extends ObjectType,
+    TArgs extends ObjectType = TReturn
+  >(
     params: IDefineParams & { key: K }
-  ): SyncDefineApi<T> & SyncEngineApi<TypeMap & Record<K, T>> {
+  ): SyncDefineApi<TReturn, TArgs> &
+    SyncEngineApi<TypeMap & Record<K, TReturn>> {
     const uniqueProperties = (params.uniqueProperties || []).filter(
       (p) => typeof p === "string" && p?.length > 0
     );
@@ -449,7 +441,7 @@ export class SyncEngineApi<TypeMap extends Record<string, ObjectType> = {}> {
       throw new AYESyncError("'uniqueProperties' must be an array of strings");
     }
 
-    const definition = new SyncDefineApi<T>(
+    const definition = new SyncDefineApi<TReturn, TArgs>(
       params.key,
       this.store,
       this.appName,
@@ -461,9 +453,8 @@ export class SyncEngineApi<TypeMap extends Record<string, ObjectType> = {}> {
     return definition as any;
   }
 
-  getDefined<K extends keyof TypeMap>(key: K): SyncDefineApi<TypeMap[K]> {
+  getDefined<K extends keyof TypeMap>(key: K): SyncDefineApi<TypeMap[K], any> {
     const definition = this.definedKeysMap[key];
-
     if (!definition) {
       throw new AYESyncError(`Key ${key?.toString()} not defined`);
     }

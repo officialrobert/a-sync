@@ -23,19 +23,26 @@ interface IUser {
   name: string;
 }
 
+interface IUserArgsDiff {
+  id: string;
+  createdAt: string;
+  name: string;
+}
+
 // Define your data and set up GET and SET APIs.
-// 'userProfile' sample
 store
-  .define<"userProfile", IUser>({
+  // IUser is the return type of the API
+  // IUserArgsDiff is the type of the arguments passed to the API (GET and SET)
+  .define<"userProfile", IUser, IUserArgsDiff>({
     key: "userProfile",
     uniqueProperties: ["id"],
   })
-  .get(async (args) => {
+  .get(async (args: Partial<IUserArgsDiff>) => {
     // you can call as many APIs as you want to fetch data and mutate 'userProfile'
     const response = await fetch(`/api/${args.id}`);
     return response.json();
   })
-  .set(async (args) => {
+  .set(async (args: Partial<IUserArgsDiff>) => {
     // you can call as many APIs as you want to fetch data and mutate 'userProfile' and save it
     const response = await fetch(`/api/user`, {
       method: "POST",

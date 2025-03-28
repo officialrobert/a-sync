@@ -1,6 +1,6 @@
 {
   "name": "@a-sync/core",
-  "version": "1.0.0",
+  "version": "0.2503.2701",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
