@@ -6,14 +6,16 @@ import {
   UseMutationOptions,
   QueryKey,
 } from "@tanstack/react-query";
-import type { SyncDefineApi } from "@a-sync/core";
+import { AYESyncError, type SyncDefineApi } from "@a-sync/core";
+
+type EnsureObject<T> = T extends object ? T : never;
 
 function useAsyncQuery<
   TReturn extends Record<string, any>,
   TArgs extends Record<string, any>
 >(
   api: SyncDefineApi<TReturn, TArgs>,
-  args: Partial<TArgs>,
+  args: EnsureObject<Partial<TArgs>>,
   options?: Omit<
     UseQueryOptions<TReturn, Error, TReturn>,
     "queryKey" | "queryFn"
@@ -33,16 +35,19 @@ function useAsyncQuery<
       let latestData: TReturn | null = null;
 
       for await (const result of api.callGet(args)) {
-        if (result.data) {
+        // Update query data whenever we get valid data from any source
+        if (
+          typeof result?.data !== null &&
+          typeof result?.data !== "undefined"
+        ) {
           latestData = result.data;
-          if (result.source === "storage") {
-            queryClient.setQueryData(queryKey, result.data);
-          }
+          // Update cache with each valid data we receive
+          queryClient.setQueryData(queryKey, result.data);
         }
       }
 
       if (!latestData) {
-        throw new Error("No data available");
+        throw new AYESyncError("No data available");
       }
 
       return latestData;
@@ -54,9 +59,15 @@ function useAsyncQuery<
   const mutation = useMutation({
     mutationFn: async (mutateArgs: Partial<TArgs>) => {
       const result = await api.callSet(mutateArgs);
-      if (!result.data) {
-        throw new Error("Failed to update data");
+
+      if (
+        !result ||
+        typeof result?.data === "undefined" ||
+        result?.data === null
+      ) {
+        throw new AYESyncError("Failed to update data");
       }
+
       return result.data;
     },
     onSuccess: (data) => {

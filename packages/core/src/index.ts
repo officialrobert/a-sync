@@ -485,3 +485,4 @@ export const init = (params: SyncEngineParams): SyncEngineApi => {
 };
 
 export { IDefineParams, SyncEngineParams } from "./types";
+export { AYESyncError } from "./error";
